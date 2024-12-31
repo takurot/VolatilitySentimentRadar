@@ -1,0 +1,2 @@
+# VolatilitySentimentRadar
+相場の暴騰と暴落を様々なシグナルから予測
