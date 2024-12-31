@@ -6,6 +6,8 @@ from datetime import timedelta
 import json
 import random
 from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
+import concurrent.futures
 
 # yfinance で株価・ビットコイン・先物などを取得
 import yfinance as yf
@@ -533,42 +535,69 @@ def generate_random_params():
     }
 
 def evaluate_signals(results, signal_type):
-    """シグナルの性能を評価（修正版）"""
-    if signal_type == "bull":
-        mask = results["bull_signal"]
-        returns = results[mask]["forward_return"].apply(lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else float(x))
-        win_rate = (returns > 0).mean() if len(returns) > 0 else 0
-        avg_return = returns.mean() if len(returns) > 0 else 0
-    else:
-        mask = results["bear_signal"]
-        returns = results[mask]["forward_return"].apply(lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else float(x))
-        win_rate = (returns < 0).mean() if len(returns) > 0 else 0
-        avg_return = -returns.mean() if len(returns) > 0 else 0
+    """シグナルの性能を評価（NoneTypeのエラー処理を追加）"""
+    try:
+        if signal_type == "bull":
+            mask = results["bull_signal"]
+            returns = results[mask]["forward_return"].apply(
+                lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else (
+                    float(x) if x is not None else 0.0
+                )
+            )
+            win_rate = (returns > 0).mean() if len(returns) > 0 else 0
+            avg_return = returns.mean() if len(returns) > 0 else 0
+        else:
+            mask = results["bear_signal"]
+            returns = results[mask]["forward_return"].apply(
+                lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else (
+                    float(x) if x is not None else 0.0
+                )
+            )
+            win_rate = (returns < 0).mean() if len(returns) > 0 else 0
+            avg_return = -returns.mean() if len(returns) > 0 else 0
 
-    # スコアの計算（勝率とリターンの組み合わせ）
-    score = (win_rate * 0.7 + (avg_return / 2) * 0.3) * 100
-    return score
+        # スコアの計算（勝率とリターンの組み合わせ）
+        score = (win_rate * 0.7 + (avg_return / 2) * 0.3) * 100
+        return score
+    except Exception as e:
+        print(f"評価中にエラーが発生: {str(e)}")
+        return 0.0  # エラーの場合は0を返す
 
-def optimize_parameters(stock_df, btc_df, futures_data, reddit_sentiment, n_simulations=100):
-    """モンテカルロシミュレーションでパラメータを最適化"""
+def optimize_parameters(stock_df, btc_df, futures_data, reddit_sentiment, n_simulations=1000):
+    """モンテカルロシミュレーションでパラメータを最適化（進捗バー付き）"""
     best_score = -float('inf')
     best_params = None
     
+    print("\nパラメータ最適化を開始...")
     with ProcessPoolExecutor() as executor:
+        # シミュレーション用のパラメータリストを事前に生成
+        param_list = [generate_random_params() for _ in range(n_simulations)]
+        
+        # tqdmで進捗を表示しながら実行
         futures = [
             executor.submit(
                 run_simulation,
-                generate_random_params(),
+                params,
                 stock_df, btc_df, futures_data, reddit_sentiment
             ) 
-            for _ in range(n_simulations)
+            for params in param_list
         ]
         
-        for future in futures:
-            result = future.result()
-            if result["total_score"] > best_score:
-                best_score = result["total_score"]
-                best_params = result["params"]
+        # as_completedを使用して完了したものから結果を取得
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=n_simulations,
+            desc="シミュレーション進捗",
+            ncols=100
+        ):
+            try:
+                result = future.result()
+                if result["total_score"] > best_score:
+                    best_score = result["total_score"]
+                    best_params = result["params"]
+            except Exception as e:
+                print(f"\nシミュレーション中にエラーが発生: {str(e)}")
+                continue
 
     return best_params, best_score
 
@@ -638,16 +667,40 @@ if __name__ == "__main__":
 
     # バックテストの実行
     print("\n=== バックテストの実行 ===")
-    backtest_results = backtest_signals("^GSPC", "2015-01-01")
+    backtest_results = backtest_signals("^GSPC", "2022-01-01")
     analyze_backtest_results(backtest_results)
 
     # パラメータの最適化を実行
     print("\n=== パラメータ最適化の実行 ===")
+    with tqdm(total=3, desc="データ準備", ncols=100) as pbar:
+        # データの準備
+        stock_df = fetch_stock_data("^GSPC")
+        pbar.update(1)
+        
+        btc_df = fetch_bitcoin_data("BTC-USD")
+        pbar.update(1)
+        
+        futures_data = fetch_all_futures_data()
+        pbar.update(1)
+
+    # Redditデータを取得
+    print("\nRedditデータの取得中...")
+    reddit_posts = fetch_all_reddit_posts(
+        mode="hot",
+        limit_per_subreddit=50
+    )
+
+    # センチメント集計
+    print("\nセンチメント分析中...")
+    reddit_sentiment = analyze_reddit_sentiment(reddit_posts)
+
+    # 最適化の実行
     best_params, best_score = optimize_parameters(
         stock_df, btc_df, futures_data, reddit_sentiment,
-        n_simulations=1000  # シミュレーション回数
+        n_simulations=3000
     )
     
+    print("\n=== 最適化結果 ===")
     print("\n最適なパラメータ:")
     for key, value in best_params.items():
         print(f"{key}: {value:.3f}")
