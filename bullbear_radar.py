@@ -231,7 +231,7 @@ def detect_market_signals(stock_df, btc_df, futures_data, reddit_sentiment):
     """
     signals = {}
     
-    # 1. 期間設定の見直し
+    # 1. 期間設定
     analysis_periods = {
         "very_short_term": 3,    # 3日
         "short_term": 5,         # 1週間
@@ -247,129 +247,29 @@ def detect_market_signals(stock_df, btc_df, futures_data, reddit_sentiment):
     for symbol, data in futures_data.items():
         signals["futures"][symbol] = analyze_market_trends(data["data"], analysis_periods.values())
 
-    # 2. ボラティリティの動的閾値設定（より厳格に）
-    vol_lookback = 252  # 1年
-    if len(stock_df) >= vol_lookback:
-        historical_vol = stock_df["Returns"].rolling(vol_lookback).std() * 100
-        vol_threshold = historical_vol.mean() + 2 * historical_vol.std()  # 2標準偏差に変更
-    else:
-        vol_threshold = 2.5  # デフォルト値を引き上げ
+    # 2. 最適化されたパラメータを設定
+    bull_conditions = {
+        "return_threshold": 2.184,    # 最適化された値
+        "consec_days": 2,             # 最適化された値
+        "sentiment_threshold": 0.736,  # 最適化された値
+        "futures_consensus": 0.673     # 最適化された値
+    }
+    
+    bear_conditions = {
+        "return_threshold": 2.135,     # 最適化された値
+        "consec_days": 5,             # 最適化された値
+        "sentiment_threshold": 0.885,  # 最適化された値
+        "futures_consensus": 0.676,    # 最適化された値
+        "drawdown_threshold": -6.556   # 最適化された値
+    }
 
     bull_signals = 0
     bear_signals = 0
 
-    # 強気と弱気の判定基準を分離
-    bull_conditions = {
-        "return_threshold": 2.0,      # リターンの閾値
-        "consec_days": 3,             # 連続上昇/下落日数
-        "sentiment_threshold": 0.6,    # センチメントの閾値
-        "futures_consensus": 0.6       # 先物市場のコンセンサス
-    }
+    # 3. 最適化された閾値を使用
+    bull_threshold = 3.490  # 最適化された値
+    bear_threshold = 3.452  # 最適化された値
     
-    bear_conditions = {
-        "return_threshold": 2.5,      # より厳格なリターンの閾値
-        "consec_days": 4,             # より長い連続下落日数
-        "sentiment_threshold": 0.7,    # より厳格なセンチメントの閾値
-        "futures_consensus": 0.7,      # より強い市場コンセンサス
-        "drawdown_threshold": -5.0     # ドローダウンの閾値
-    }
-
-    for period, days in analysis_periods.items():
-        # 強気シグナルの判定
-        if signals["stock"][days]["return"] > bull_conditions["return_threshold"] * np.sqrt(days/20):
-            bull_signals += 1.5
-            
-        # 弱気シグナルの判定
-        if signals["stock"][days]["return"] < -bear_conditions["return_threshold"] * np.sqrt(days/20):
-            bear_signals += 1.5
-
-        if len(stock_df) >= 200:
-            ma20 = stock_df['Close'].rolling(20).mean()
-            ma50 = stock_df['Close'].rolling(50).mean()
-            ma200 = stock_df['Close'].rolling(200).mean()
-            
-            current_price = stock_df['Close'].iloc[-1].item()
-            
-            # ゴールデンクロス（強気）
-            if (ma20.iloc[-1].item() > ma50.iloc[-1].item() and 
-                ma20.iloc[-2].item() < ma50.iloc[-2].item()):
-                bull_signals += 1.0
-            
-            # デッドクロス（弱気）
-            if (ma20.iloc[-1].item() < ma50.iloc[-1].item() and 
-                ma20.iloc[-2].item() > ma50.iloc[-2].item()):
-                bear_signals += 1.0
-
-            # 長期移動平均との関係
-            if current_price > ma200.iloc[-1].item():
-                bull_signals += 0.5
-            if current_price < ma200.iloc[-1].item():
-                bear_signals += 0.5
-
-        # 連続上昇/下落日数のチェック
-        consecutive_up_days = 0
-        consecutive_down_days = 0
-        for i in range(min(days, len(stock_df))):
-            if stock_df['Returns'].iloc[-(i+1)] > 0:
-                consecutive_up_days += 1
-            else:
-                break
-        
-        for i in range(min(days, len(stock_df))):
-            if stock_df['Returns'].iloc[-(i+1)] < 0:
-                consecutive_down_days += 1
-            else:
-                break
-
-        if consecutive_up_days >= bull_conditions["consec_days"]:
-            bull_signals += 0.5
-        if consecutive_down_days >= bear_conditions["consec_days"]:
-            bear_signals += 0.5
-
-        # 先物市場のコンセンサス
-        try:
-            futures_up_count = 0
-            futures_down_count = 0
-            valid_futures = 0
-            
-            for symbol, data in futures_data.items():
-                if len(data["data"]) >= days:
-                    returns = data["data"]["Returns"].tail(days)
-                    if not returns.empty and not np.all(returns == returns.iloc[0]):
-                        valid_futures += 1
-                        if returns.sum() > bull_conditions["return_threshold"]:
-                            futures_up_count += 1
-                        if returns.sum() < -bear_conditions["return_threshold"]:
-                            futures_down_count += 1
-            
-            if valid_futures > 0:
-                if futures_up_count >= valid_futures * bull_conditions["futures_consensus"]:
-                    bull_signals += 1.0
-                if futures_down_count >= valid_futures * bear_conditions["futures_consensus"]:
-                    bear_signals += 1.0
-        except Exception:
-            pass
-
-    # センチメントによる判定
-    if reddit_sentiment["positive_ratio"] > bull_conditions["sentiment_threshold"]:
-        if reddit_sentiment["mean_sentiment"] > 0.2:
-            bull_signals += 1.0
-    if reddit_sentiment["negative_ratio"] > bear_conditions["sentiment_threshold"]:
-        if reddit_sentiment["mean_sentiment"] < -0.2:
-            bear_signals += 1.0
-
-    # 動的シグナル閾値の調整
-    market_volatility = stock_df["Returns"].tail(20).std() * 100
-    bull_threshold = 3.0
-    bear_threshold = 3.5  # 弱気の基本閾値を調整
-    
-    if market_volatility > vol_threshold:
-        bull_threshold = 4.0
-        bear_threshold = 4.5
-    elif market_volatility < vol_threshold * 0.5:
-        bull_threshold = 2.5
-        bear_threshold = 3.0
-
     # 最終判定
     signals["bull_signal"] = (bull_signals >= bull_threshold)
     signals["bear_signal"] = (bear_signals >= bear_threshold)
@@ -381,9 +281,9 @@ def detect_market_signals(stock_df, btc_df, futures_data, reddit_sentiment):
 # 4. メインの実行フロー
 ########################################
 
-def backtest_signals(ticker="^GSPC", start_date="2020-01-01", end_date=None):
+def backtest_signals(ticker="^GSPC", start_date="2020-01-01", end_date=None, params=None):
     """
-    指定期間でのバックテストを実行
+    指定期間でのバックテストを実行（パラメータ化）
     """
     # データ取得
     stock = yf.download(ticker, start=start_date, end=end_date, progress=False)
@@ -404,7 +304,7 @@ def backtest_signals(ticker="^GSPC", start_date="2020-01-01", end_date=None):
         stock_window["Returns"] = stock_window["Close"].pct_change()
         btc_window["Returns"] = btc_window["Close"].pct_change()
         
-        # 先物データ（簡略化のため株価の代用可）
+        # 先物データ（簡略化のため株価の代用）
         futures_data = {"ES=F": {"name": "S&P 500 E-mini", "data": stock_window}}
         
         # センチメントデータ（過去データの取得は困難なため、ダミー値を使用）
@@ -415,10 +315,13 @@ def backtest_signals(ticker="^GSPC", start_date="2020-01-01", end_date=None):
             "negative_ratio": 0.5
         }
         
-        # シグナル検出
-        signals = detect_market_signals(stock_window, btc_window, futures_data, dummy_sentiment)
+        # シグナル検出（パラメータを使用）
+        signals = detect_market_signals_with_params(
+            stock_window, btc_window, futures_data, dummy_sentiment,
+            params if params else get_default_params()
+        )
         
-        # 次の20営業日のリターンを計算（シグナルの成績評価用）
+        # 次の20営業日のリターンを計算
         try:
             if i + 20 < len(stock.index):
                 next_close = stock["Close"].iloc[i + 20]
@@ -439,6 +342,100 @@ def backtest_signals(ticker="^GSPC", start_date="2020-01-01", end_date=None):
         })
     
     return pd.DataFrame(backtest_results)
+
+def get_default_params():
+    """デフォルトのパラメータを返す（最適化後の値）"""
+    return {
+        # 強気パラメータ
+        "bull_return": 2.043,      # 最適化された値
+        "bull_consec": 5,          # 最適化された値
+        "bull_sentiment": 0.750,   # 最適化された値
+        "bull_futures": 0.537,     # 最適化された値
+        "bull_threshold": 2.909,   # 最適化された値
+        
+        # 弱気パラメータ
+        "bear_return": 2.985,      # 最適化された値
+        "bear_consec": 3,          # 最適化された値
+        "bear_sentiment": 0.825,   # 最適化された値
+        "bear_futures": 0.895,     # 最適化された値
+        "bear_drawdown": -6.730,   # 最適化された値
+        "bear_threshold": 4.488    # 最適化された値
+    }
+
+def detect_market_signals_with_params(stock_df, btc_df, futures_data, reddit_sentiment, params):
+    """
+    パラメータ化されたシグナル検出関数
+    """
+    signals = {}
+    
+    # 1. 期間設定
+    analysis_periods = {
+        "very_short_term": 3,
+        "short_term": 5,
+        "medium_term": 20,
+        "long_term": 60,
+        "very_long_term": 120
+    }
+
+    # 各市場の分析を実行
+    signals["stock"] = analyze_market_trends(stock_df, analysis_periods.values())
+    signals["btc"] = analyze_market_trends(btc_df, analysis_periods.values())
+    signals["futures"] = {}
+    for symbol, data in futures_data.items():
+        signals["futures"][symbol] = analyze_market_trends(data["data"], analysis_periods.values())
+
+    bull_signals = 0
+    bear_signals = 0
+
+    # 3. シグナルの計算
+    for period, days in analysis_periods.items():
+        # リターンの判定
+        if signals["stock"][days]["return"] > params["bull_return"]:
+            bull_signals += 1.0
+        if signals["stock"][days]["return"] < -params["bear_return"]:
+            bear_signals += 1.0
+            
+        # ボラティリティの判定
+        vol = signals["stock"][days]["volatility"]
+        if vol > 20:  # 高ボラティリティ
+            if signals["stock"][days]["return"] > 0:
+                bull_signals += 0.5
+            else:
+                bear_signals += 0.5
+
+        # ドローダウンの判定
+        if signals["stock"][days]["max_drawdown"] < params["bear_drawdown"]:
+            bear_signals += 1.0
+
+    # 4. 先物市場のコンセンサス
+    futures_up_count = 0
+    futures_down_count = 0
+    valid_futures = 0
+    
+    for symbol, data in signals["futures"].items():
+        valid_futures += 1
+        if data[20]["return"] > params["bull_return"]:
+            futures_up_count += 1
+        if data[20]["return"] < -params["bear_return"]:
+            futures_down_count += 1
+
+    if valid_futures > 0:
+        if futures_up_count >= valid_futures * params["bull_futures"]:
+            bull_signals += 1.0
+        if futures_down_count >= valid_futures * params["bear_futures"]:
+            bear_signals += 1.0
+
+    # 5. センチメントの判定
+    if reddit_sentiment["positive_ratio"] > params["bull_sentiment"]:
+        bull_signals += 1.0
+    if reddit_sentiment["negative_ratio"] > params["bear_sentiment"]:
+        bear_signals += 1.0
+
+    # 6. 最終判定
+    signals["bull_signal"] = (bull_signals >= params["bull_threshold"])
+    signals["bear_signal"] = (bear_signals >= params["bear_threshold"])
+    
+    return signals
 
 def analyze_backtest_results(results):
     """
@@ -475,38 +472,19 @@ def analyze_backtest_results(results):
         print(f"平均リターン: {mean_return:.2f}%")
 
 def run_simulation(params, stock_df, btc_df, futures_data, reddit_sentiment):
-    """単一シミュレーションを実行（グローバルスコープに移動）"""
-    bull_conditions = {
-        "return_threshold": params["bull_return"],
-        "consec_days": int(params["bull_consec"]),
-        "sentiment_threshold": params["bull_sentiment"],
-        "futures_consensus": params["bull_futures"]
-    }
-    
-    bear_conditions = {
-        "return_threshold": params["bear_return"],
-        "consec_days": int(params["bear_consec"]),
-        "sentiment_threshold": params["bear_sentiment"],
-        "futures_consensus": params["bear_futures"],
-        "drawdown_threshold": params["bear_drawdown"]
-    }
-
-    bull_threshold = params["bull_threshold"]
-    bear_threshold = params["bear_threshold"]
-
-    # シグナル検出を実行
-    signals = detect_market_signals_with_params(
-        stock_df, btc_df, futures_data, reddit_sentiment,
-        bull_conditions, bear_conditions,
-        bull_threshold, bear_threshold
-    )
-
+    """
+    バックテストと同じ方法でシミュレーションを実行
+    """
     # バックテスト結果を取得
-    backtest_results = backtest_signals("^GSPC", "2015-01-01")
+    backtest_results = backtest_signals(
+        ticker="^GSPC",
+        start_date="2015-01-01",
+        params=params  # パラメータを渡す
+    )
     
-    # 評価指標を計算
-    bull_score = evaluate_signals(backtest_results, "bull")
-    bear_score = evaluate_signals(backtest_results, "bear")
+    # バックテストの評価指標を計算
+    bull_score = evaluate_backtest_signals(backtest_results, "bull")
+    bear_score = evaluate_backtest_signals(backtest_results, "bear")
     
     return {
         "params": params,
@@ -601,79 +579,59 @@ def optimize_parameters(stock_df, btc_df, futures_data, reddit_sentiment, n_simu
 
     return best_params, best_score
 
-def detect_market_signals_with_params(stock_df, btc_df, futures_data, reddit_sentiment,
-                                    bull_conditions, bear_conditions,
-                                    bull_threshold, bear_threshold):
+def evaluate_backtest_signals(results, signal_type):
     """
-    パラメータ化されたシグナル検出関数
-    （既存のdetect_market_signals関数の内容をパラメータ化）
+    バックテスト結果の評価を改善
     """
-    # 既存の関数の内容をここに移動し、
-    # bull_conditions, bear_conditions, bull_threshold, bear_thresholdを使用
-    pass
+    try:
+        if signal_type == "bull":
+            mask = results["bull_signal"]
+            returns = results[mask]["forward_return"].apply(
+                lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else (
+                    float(x) if x is not None else 0.0
+                )
+            )
+            win_rate = (returns > 0).mean() if len(returns) > 0 else 0
+            avg_return = returns.mean() if len(returns) > 0 else 0
+        else:  # bear
+            mask = results["bear_signal"]
+            returns = results[mask]["forward_return"].apply(
+                lambda x: float(x.iloc[0]) if isinstance(x, pd.Series) else (
+                    float(x) if x is not None else 0.0
+                )
+            )
+            win_rate = (returns < 0).mean() if len(returns) > 0 else 0
+            avg_return = -returns.mean() if len(returns) > 0 else 0
 
-if __name__ == "__main__":
-    # 例: S&P 500, BTC-USD, S&P 500 先物
-    stock_df = fetch_stock_data("^GSPC")
-    btc_df = fetch_bitcoin_data("BTC-USD")
-    futures_data = fetch_all_futures_data()
+        # シグナル頻度の計算を追加
+        signal_frequency = len(returns) / len(results) if len(results) > 0 else 0
+        
+        # 適度なシグナル頻度を目指す（例：10%～30%の範囲で最適）
+        frequency_score = 1.0 - abs(0.2 - signal_frequency) * 2  # 20%が最適
+        
+        # スコアの計算（リターンを重視）
+        score = (
+            win_rate * 0.3 +            # 勝率の重み
+            (avg_return * 2) * 0.5 +    # リターンの重み（2倍にして重視）
+            frequency_score * 0.2        # 頻度スコアの重み
+        ) * 100
 
-    # Redditデータを取得（複数のサブレディットから）
-    reddit_posts = fetch_all_reddit_posts(
-        mode="hot",
-        limit_per_subreddit=50
-    )
+        return max(0, score)  # 負のスコアは0に
 
-    # センチメント集計
-    reddit_sentiment = analyze_reddit_sentiment(reddit_posts)
+    except Exception as e:
+        print(f"評価中にエラーが発生: {str(e)}")
+        return 0.0
 
-    # 簡易シグナル検出
-    signals = detect_market_signals(stock_df, btc_df, futures_data, reddit_sentiment)
-
-    print("=== 市場分析結果 (詳細版) ===")
+def main(run_simulation=False, n_simulations=1000):
+    """
+    メイン処理
+    :param run_simulation: シミュレーションを実行するかどうか（デフォルトFalse）
+    :param n_simulations: シミュレーション回数（デフォルト1000）
+    """
+    print("=== 市場分析開始 ===")
     
-    print("\n--- 株式市場 ---")
-    for period, analysis in signals["stock"].items():
-        print(f"\n{period}日間の分析:")
-        print(f"  トレンド: {analysis['direction']}")
-        print(f"  リターン: {analysis['return']:.2f}%")
-        print(f"  ボラティリティ: {analysis['volatility']:.2f}%")
-        print(f"  最大ドローダウン: {analysis['max_drawdown']:.2f}%")
-
-    print("\n--- 仮想通貨市場 ---")
-    for period, analysis in signals["btc"].items():
-        print(f"\n{period}日間の分析:")
-        print(f"  トレンド: {analysis['direction']}")
-        print(f"  リターン: {analysis['return']:.2f}%")
-        print(f"  ボラティリティ: {analysis['volatility']:.2f}%")
-        print(f"  最大ドローダウン: {analysis['max_drawdown']:.2f}%")
-
-    print("\n--- 先物市場 ---")
-    for symbol, data in signals['futures'].items():
-        print(f"\n{symbol}:")
-        for period, analysis in data.items():
-            print(f"  {period}日間の分析:")
-            print(f"    トレンド: {analysis['direction']}")
-            print(f"    リターン: {analysis['return']:.2f}%")
-            print(f"    ボラティリティ: {analysis['volatility']:.2f}%")
-            print(f"    最大ドローダウン: {analysis['max_drawdown']:.2f}%")
-
-    if signals["bull_signal"]:
-        print("[シグナル] 暴騰の可能性 (強気シグナル検出)")
-    elif signals["bear_signal"]:
-        print("[シグナル] 暴落の可能性 (弱気シグナル検出)")
-    else:
-        print("[シグナル] 特に大きなシグナルは検出されませんでした")
-
-    # バックテストの実行
-    print("\n=== バックテストの実行 ===")
-    backtest_results = backtest_signals("^GSPC", "2022-01-01")
-    analyze_backtest_results(backtest_results)
-
-    # パラメータの最適化を実行
-    print("\n=== パラメータ最適化の実行 ===")
+    # データ準備
     with tqdm(total=3, desc="データ準備", ncols=100) as pbar:
-        # データの準備
         stock_df = fetch_stock_data("^GSPC")
         pbar.update(1)
         
@@ -694,15 +652,68 @@ if __name__ == "__main__":
     print("\nセンチメント分析中...")
     reddit_sentiment = analyze_reddit_sentiment(reddit_posts)
 
-    # 最適化の実行
-    best_params, best_score = optimize_parameters(
-        stock_df, btc_df, futures_data, reddit_sentiment,
-        n_simulations=3000
+    if run_simulation:
+        print("\n=== パラメータ最適化の実行 ===")
+        best_params, best_score = optimize_parameters(
+            stock_df, btc_df, futures_data, reddit_sentiment,
+            n_simulations=n_simulations
+        )
+        
+        print("\n=== 最適化結果 ===")
+        print("\n最適なパラメータ:")
+        for key, value in best_params.items():
+            print(f"{key}: {value:.3f}")
+        print(f"\n総合スコア: {best_score:.2f}")
+        
+        # 最適化されたパラメータでバックテスト
+        params = best_params
+    else:
+        # デフォルトパラメータを使用
+        params = get_default_params()
+
+    # バックテストの実行
+    print("\n=== バックテストの実行 ===")
+    print("期間: 2017-01-01 から現在まで")
+    backtest_results = backtest_signals(
+        ticker="^GSPC",
+        start_date="2017-01-01",
+        params=params
     )
     
-    print("\n=== 最適化結果 ===")
-    print("\n最適なパラメータ:")
-    for key, value in best_params.items():
-        print(f"{key}: {value:.3f}")
-    print(f"\n総合スコア: {best_score:.2f}")
+    # バックテスト結果の分析
+    print("\n=== バックテスト結果 ===")
+    analyze_backtest_results(backtest_results)
+
+    # 現在の市場分析
+    print("\n=== 現在の市場分析 ===")
+    signals = detect_market_signals_with_params(
+        stock_df, btc_df, futures_data, reddit_sentiment, params
+    )
+    
+    print("\n--- 株式市場 ---")
+    for period, analysis in signals["stock"].items():
+        print(f"\n{period}日間の分析:")
+        print(f"  トレンド: {analysis['direction']}")
+        print(f"  リターン: {analysis['return']:.2f}%")
+        print(f"  ボラティリティ: {analysis['volatility']:.2f}%")
+        print(f"  最大ドローダウン: {analysis['max_drawdown']:.2f}%")
+    
+    # シグナル判定の表示
+    if signals["bull_signal"]:
+        print("\n[シグナル] 暴騰の可能性 (強気シグナル検出)")
+    elif signals["bear_signal"]:
+        print("\n[シグナル] 暴落の可能性 (弱気シグナル検出)")
+    else:
+        print("\n[シグナル] 特に大きなシグナルは検出されませんでした")
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='市場分析とシグナル検出')
+    parser.add_argument('--simulate', action='store_true', help='パラメータ最適化シミュレーションを実行')
+    parser.add_argument('--n-sims', type=int, default=1000, help='シミュレーション回数')
+    
+    args = parser.parse_args()
+    
+    main(run_simulation=args.simulate, n_simulations=args.n_sims)
 
